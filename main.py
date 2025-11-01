@@ -26,7 +26,7 @@ app = FastAPI(title="AI Resume Matcher API", version="1.0.0")
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://resume-matcher-frontend-plum.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
