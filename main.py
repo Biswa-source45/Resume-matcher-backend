@@ -1,15 +1,16 @@
-from fastapi import FastAPI, Request, Response, UploadFile, File, Form, HTTPException, Depends
+# ...existing code...
+from fastapi import FastAPI, Request, Response, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from typing import Optional, Dict, Any, List
-import os
+from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
+import os
 from datetime import datetime
 
 from utils.auth import (
-    create_jwt, 
-    verify_jwt_cookie, 
-    set_auth_cookie, 
+    create_jwt,
+    verify_jwt_cookie,
+    set_auth_cookie,
     clear_auth_cookie,
 )
 from utils.pdf_reader import extract_text_from_pdf, validate_pdf
@@ -19,14 +20,16 @@ from utils.db import SupabaseDB
 # Load environment variables
 load_dotenv()
 
-FRONTEND_ORIGIN = os.getenv("FRONTEND_URL", "http://localhost:5173")
-# Create FastAPI app
+# FRONTEND_URL may contain a comma-separated list of allowed origins
+_frontend_env = os.getenv("FRONTEND_URL", "http://localhost:5173")
+FRONTEND_ORIGINS = [o.strip() for o in _frontend_env.split(",") if o.strip()]
+
 app = FastAPI(title="AI Resume Matcher API", version="1.0.0")
 
-# Configure CORS
+# Configure CORS: exact origin(s) and credentials required
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN],
+    allow_origins=FRONTEND_ORIGINS or ["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -40,34 +43,50 @@ db = SupabaseDB()
 async def root():
     return {"message": "AI Resume Matcher API", "version": "1.0.0"}
 
+
 @app.post("/set-cookie")
 async def set_cookie_endpoint(request: Request, response: Response):
     """
-    Accepts JSON with an access_token (or a session object containing access_token).
-    Sets an httpOnly cookie so subsequent browser requests include it.
+    Accepts JSON with a Supabase session object (recommended):
+      { "session": { "access_token": "...", "user": { "id": "...", "email": "..." } } }
+    Creates a backend-signed JWT containing minimal user info and sets it as an httpOnly cookie
+    so subsequent browser requests will be authenticated by the backend.
     """
     body = await request.json()
-    access_token = body.get("access_token") or (body.get("session") or {}).get("access_token")
-    if not access_token:
-        return JSONResponse({"detail": "missing access_token"}, status_code=400)
-    # Optionally: validate token contents here
-    set_auth_cookie(response, access_token)
+    session = body.get("session") or {}
+    user = session.get("user") or body.get("user")
+
+    if not user or not user.get("id"):
+        return JSONResponse({"detail": "missing user in session"}, status_code=400)
+
+    # Build payload for backend JWT (minimal info)
+    payload = {
+        "sub": user.get("id"),
+        "email": user.get("email"),
+        "iat": datetime.utcnow().timestamp(),
+    }
+    token = create_jwt(payload)
+    set_auth_cookie(response, token)
     return {"detail": "cookie set"}
+
 
 @app.post("/logout")
 async def logout_endpoint(response: Response):
     clear_auth_cookie(response)
     return {"detail": "logged out"}
 
+
 @app.get("/protected")
 async def protected_route(user: Dict[str, Any] = Depends(verify_jwt_cookie)):
     """Protected route for testing authentication"""
     return {"message": "Authenticated!", "user": user}
 
+
 @app.get("/me")
 async def get_current_user(user: Dict[str, Any] = Depends(verify_jwt_cookie)):
     """Get current authenticated user"""
     return {"user": user}
+
 
 @app.post("/analyze-resume")
 async def analyze_resume(
@@ -77,7 +96,7 @@ async def analyze_resume(
 ):
     """Analyze uploaded resume"""
 
-    if not file.filename.endswith('.pdf'):
+    if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
     try:
@@ -101,7 +120,7 @@ async def analyze_resume(
         analysis = analyzer.analyze_resume(resume_text)
 
         # Save to DB
-        user_id = user["sub"]
+        user_id = user.get("sub")
         saved_analysis = await db.save_resume_analysis(
             user_id=user_id,
             resume_title=file.filename,
@@ -125,57 +144,61 @@ async def chat_with_ai(
     user: Dict[str, Any] = Depends(verify_jwt_cookie)
 ):
     """Chat with AI using resume context"""
-    
+
     try:
         body = await request.json()
         message = body.get("message")
-        
+
         if not message:
             raise HTTPException(status_code=400, detail="Message is required")
-        
+
         # Get user's latest resume analysis
-        user_id = user["sub"]
+        user_id = user.get("sub")
         latest_analysis = await db.get_latest_analysis(user_id)
-        
+
         if not latest_analysis:
             raise HTTPException(status_code=404, detail="No resume analysis found")
-        
+
         # Create resume summary for context
         resume_summary = f"""
         Summary: {latest_analysis.get('summary_text', '')}
-        Job Roles: {', '.join(latest_analysis.get('job_roles', []))}
-        Skills: {', '.join(latest_analysis.get('soft_skills', []) + latest_analysis.get('technical_skills', []))}
+        Job Roles: {', '.join(latest_analysis.get('job_roles', []) or [])}
+        Skills: {', '.join((latest_analysis.get('soft_skills') or []) + (latest_analysis.get('technical_skills') or []))}
         Experience Level: {latest_analysis.get('experience_level', '')}
         """
-        
+
         # Generate AI response
-        response = analyzer.chat_with_context(resume_summary, message)
-        
+        response_text = analyzer.chat_with_context(resume_summary, message)
+
         return {
-            "reply": response,
+            "reply": response_text,
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
+
 
 @app.get("/summaries")
 async def get_summaries(
     user: Dict[str, Any] = Depends(verify_jwt_cookie)
 ):
     """Get all resume analyses for the current user"""
-    
+
     try:
-        user_id = user["sub"]
+        user_id = user.get("sub")
         analyses = await db.get_user_analyses(user_id)
-        
+
         return {
             "summaries": analyses,
-            "count": len(analyses)
+            "count": len(analyses or [])
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching summaries: {str(e)}")
+
 
 @app.delete("/summaries/{analysis_id}")
 async def delete_summary(
@@ -183,18 +206,19 @@ async def delete_summary(
     user: Dict[str, Any] = Depends(verify_jwt_cookie)
 ):
     """Delete a specific resume analysis"""
-    
+
     try:
-        user_id = user["sub"]
+        user_id = user.get("sub")
         success = await db.delete_analysis(analysis_id, user_id)
-        
+
         if not success:
             raise HTTPException(status_code=404, detail="Analysis not found")
-        
+
         return {"message": "Analysis deleted successfully"}
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting summary: {str(e)}")
+
 
 @app.get("/health")
 async def health_check():
@@ -208,6 +232,8 @@ async def health_check():
         }
     }
 
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
+# ...existing code...

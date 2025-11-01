@@ -12,7 +12,7 @@ def create_jwt(payload: dict, expires_in_days: int = 7) -> str:
     payload["exp"] = datetime.utcnow() + timedelta(days=expires_in_days)
     payload["iat"] = datetime.utcnow()
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
-    # jwt.encode returns str in PyJWT>=2.x
+    # PyJWT returns str for >=2.x
     return token
 
 def verify_jwt_cookie(request: Request) -> Dict[str, Any]:
@@ -28,9 +28,12 @@ def verify_jwt_cookie(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 def set_auth_cookie(response: Response, token: str, max_age: int = 60 * 60 * 24 * 7):
+    """
+    Set httpOnly cookie 'access_token' with options controlled by env:
+    COOKIE_SECURE (true/false) and COOKIE_SAMESITE (none/lax/strict).
+    """
     cookie_secure = os.getenv("COOKIE_SECURE", "true").lower() == "true"
     samesite_val = os.getenv("COOKIE_SAMESITE", "none").lower()  # 'none' for cross-site
-    # set cookie; path="/" so it applies to all backend routes
     response.set_cookie(
         key="access_token",
         value=token,
