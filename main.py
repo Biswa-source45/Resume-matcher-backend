@@ -20,13 +20,14 @@ from utils.db import SupabaseDB
 # Load environment variables
 load_dotenv()
 
+FRONTEND_ORIGIN = os.getenv("FRONTEND_URL", "http://localhost:5173")
 # Create FastAPI app
 app = FastAPI(title="AI Resume Matcher API", version="1.0.0")
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://resume-matcher-frontend-plum.vercel.app"],
+    allow_origins=[FRONTEND_ORIGIN],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,37 +42,23 @@ async def root():
     return {"message": "AI Resume Matcher API", "version": "1.0.0"}
 
 @app.post("/set-cookie")
-async def set_cookie(request: Request, response: Response):
-    """Set authentication cookie from Supabase session"""
-    try:
-        body = await request.json()
-        access_token = body.get("access_token")
-        user = body.get("user")
-        refresh_token = body.get("refresh_token")
-
-        if not access_token or not user:
-            raise HTTPException(status_code=400, detail="Invalid session data")
-
-        # Create custom backend JWT for cookie
-        jwt_payload = {
-            "sub": user["id"],
-            "email": user["email"],
-            "supabase_token": access_token,
-            "refresh_token": refresh_token
-        }
-        
-        jwt_token = create_jwt(jwt_payload)
-        set_auth_cookie(response, jwt_token)
-        
-        return {"message": "Cookie set successfully", "user": user}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+async def set_cookie_endpoint(request: Request, response: Response):
+    """
+    Accepts JSON with an access_token (or a session object containing access_token).
+    Sets an httpOnly cookie so subsequent browser requests include it.
+    """
+    body = await request.json()
+    access_token = body.get("access_token") or (body.get("session") or {}).get("access_token")
+    if not access_token:
+        return JSONResponse({"detail": "missing access_token"}, status_code=400)
+    # Optionally: validate token contents here
+    set_auth_cookie(response, access_token)
+    return {"detail": "cookie set"}
 
 @app.post("/logout")
-async def logout(response: Response):
-    """Clear authentication cookie"""
+async def logout_endpoint(response: Response):
     clear_auth_cookie(response)
-    return {"message": "Logged out successfully"}
+    return {"detail": "logged out"}
 
 @app.get("/protected")
 async def protected_route(user: Dict[str, Any] = Depends(verify_jwt_cookie)):
