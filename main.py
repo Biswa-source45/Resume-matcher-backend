@@ -11,7 +11,6 @@ from utils.auth import (
     verify_jwt_cookie, 
     set_auth_cookie, 
     clear_auth_cookie,
-    Depends
 )
 from utils.pdf_reader import extract_text_from_pdf, validate_pdf
 from utils.ai_analyzer import ResumeAnalyzer
