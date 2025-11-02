@@ -4,8 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
-import os
 from datetime import datetime
+import os
 
 from utils.auth import (
     create_jwt,
@@ -35,9 +35,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize services
+# Initialize services (assume these are implemented in utils)
 analyzer = ResumeAnalyzer()
 db = SupabaseDB()
+
 
 @app.get("/")
 async def root():
@@ -92,63 +93,50 @@ async def get_current_user(user: Dict[str, Any] = Depends(verify_jwt_cookie)):
 async def analyze_resume(
     request: Request,
     file: UploadFile = File(...),
-    user: Dict[str, Any] = Depends(verify_jwt_cookie)
+    user: Dict[str, Any] = Depends(verify_jwt_cookie),
 ):
     """Analyze uploaded resume"""
 
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
-
     try:
-        # Read bytes
+        # Read bytes (validate content rather than rely on filename)
         file_content = await file.read()
 
-        # File size validation
+        # Basic size validation
         if len(file_content) > 10 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="File size too large")
+            raise HTTPException(status_code=400, detail="File size too large (max 10MB)")
 
-        # Validate PDF
+        # Validate PDF from bytes (do not rely on file.filename)
         if not validate_pdf(file_content):
-            raise HTTPException(status_code=400, detail="Invalid PDF file")
+            raise HTTPException(status_code=400, detail="Invalid or unsupported file. Please upload a PDF.")
 
         # Extract text
         resume_text = extract_text_from_pdf(file_content)
-        if not resume_text.strip():
+        if not resume_text or not resume_text.strip():
             raise HTTPException(status_code=400, detail="No text found in PDF")
 
         # AI Analysis
         analysis = analyzer.analyze_resume(resume_text)
 
-        # Save to DB
+        # Save to DB (assume async save)
         user_id = user.get("sub")
         saved_analysis = await db.save_resume_analysis(
-            user_id=user_id,
-            resume_title=file.filename,
-            analysis=analysis
+            user_id=user_id, resume_title=(file.filename or "resume.pdf"), analysis=analysis
         )
 
-        return {
-            "message": "Analysis completed successfully",
-            "analysis": saved_analysis
-        }
-
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return {"message": "Analysis completed successfully", "analysis": saved_analysis}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing resume: {str(e)}")
+        # Avoid leaking internal errors to client
+        raise HTTPException(status_code=500, detail="Error processing resume")
 
 
 @app.post("/chat")
-async def chat_with_ai(
-    request: Request,
-    user: Dict[str, Any] = Depends(verify_jwt_cookie)
-):
+async def chat_with_ai(request: Request, user: Dict[str, Any] = Depends(verify_jwt_cookie)):
     """Chat with AI using resume context"""
-
     try:
         body = await request.json()
         message = body.get("message")
-
         if not message:
             raise HTTPException(status_code=400, detail="Message is required")
 
@@ -160,64 +148,45 @@ async def chat_with_ai(
             raise HTTPException(status_code=404, detail="No resume analysis found")
 
         # Create resume summary for context
-        resume_summary = f"""
-        Summary: {latest_analysis.get('summary_text', '')}
-        Job Roles: {', '.join(latest_analysis.get('job_roles', []) or [])}
-        Skills: {', '.join((latest_analysis.get('soft_skills') or []) + (latest_analysis.get('technical_skills') or []))}
-        Experience Level: {latest_analysis.get('experience_level', '')}
-        """
+        resume_summary = (
+            f"Summary: {latest_analysis.get('summary_text', '')}\n"
+            f"Job Roles: {', '.join(latest_analysis.get('job_roles', []) or [])}\n"
+            f"Skills: {', '.join((latest_analysis.get('soft_skills') or []) + (latest_analysis.get('technical_skills') or []))}\n"
+            f"Experience Level: {latest_analysis.get('experience_level', '')}"
+        )
 
         # Generate AI response
         response_text = analyzer.chat_with_context(resume_summary, message)
 
-        return {
-            "reply": response_text,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
+        return {"reply": response_text, "timestamp": datetime.utcnow().isoformat()}
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Error in chat")
 
 
 @app.get("/summaries")
-async def get_summaries(
-    user: Dict[str, Any] = Depends(verify_jwt_cookie)
-):
+async def get_summaries(user: Dict[str, Any] = Depends(verify_jwt_cookie)):
     """Get all resume analyses for the current user"""
-
     try:
         user_id = user.get("sub")
         analyses = await db.get_user_analyses(user_id)
-
-        return {
-            "summaries": analyses,
-            "count": len(analyses or [])
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching summaries: {str(e)}")
+        return {"summaries": analyses, "count": len(analyses or [])}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Error fetching summaries")
 
 
 @app.delete("/summaries/{analysis_id}")
-async def delete_summary(
-    analysis_id: str,
-    user: Dict[str, Any] = Depends(verify_jwt_cookie)
-):
+async def delete_summary(analysis_id: str, user: Dict[str, Any] = Depends(verify_jwt_cookie)):
     """Delete a specific resume analysis"""
-
     try:
         user_id = user.get("sub")
         success = await db.delete_analysis(analysis_id, user_id)
-
         if not success:
             raise HTTPException(status_code=404, detail="Analysis not found")
-
         return {"message": "Analysis deleted successfully"}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error deleting summary: {str(e)}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Error deleting summary")
 
 
 @app.get("/health")
@@ -226,14 +195,12 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "services": {
-            "database": "connected",
-            "ai_analyzer": "ready"
-        }
+        "services": {"database": "connected", "ai_analyzer": "ready"},
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
 # ...existing code...
