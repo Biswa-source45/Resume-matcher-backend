@@ -29,7 +29,7 @@ app = FastAPI(title="AI Resume Matcher API", version="1.0.0")
 # Configure CORS: exact origin(s) and credentials required
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS or ["http://localhost:5173"],
+    allow_origins=[origin.strip() for origin in os.getenv("FRONTEND_URL", "http://localhost:5173").split(",")],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,47 +95,37 @@ async def analyze_resume(
     user: Dict[str, Any] = Depends(verify_jwt_cookie)
 ):
     """Analyze uploaded resume"""
-
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
-
     try:
-        # Read bytes
-        file_content = await file.read()
-
-        # File size validation
-        if len(file_content) > 10 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="File size too large")
-
-        # Validate PDF
-        if not validate_pdf(file_content):
-            raise HTTPException(status_code=400, detail="Invalid PDF file")
-
-        # Extract text
-        resume_text = extract_text_from_pdf(file_content)
-        if not resume_text.strip():
+        content = await file.read()
+        
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+            
+        if not validate_pdf(content):
+            raise HTTPException(status_code=400, detail="Invalid or unsupported PDF file")
+            
+        text = extract_text_from_pdf(content)
+        if not text.strip():
             raise HTTPException(status_code=400, detail="No text found in PDF")
-
-        # AI Analysis
-        analysis = analyzer.analyze_resume(resume_text)
-
-        # Save to DB
-        user_id = user.get("sub")
-        saved_analysis = await db.save_resume_analysis(
-            user_id=user_id,
-            resume_title=file.filename,
+            
+        analysis = analyzer.analyze_resume(text)
+        
+        saved = await db.save_resume_analysis(
+            user_id=user["sub"],
+            resume_title=file.filename or "resume.pdf",
             analysis=analysis
         )
-
+        
         return {
-            "message": "Analysis completed successfully",
-            "analysis": saved_analysis
+            "message": "Analysis completed",
+            "analysis": saved
         }
-
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing resume: {str(e)}")
+        print(f"Analysis error: {str(e)}")  # Log server-side
+        raise HTTPException(status_code=500, detail="Failed to process resume")
 
 
 @app.post("/chat")

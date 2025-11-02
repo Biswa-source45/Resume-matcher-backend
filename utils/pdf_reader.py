@@ -2,33 +2,40 @@ import io
 from typing import Optional
 from PyPDF2 import PdfReader
 
-def extract_text_from_pdf(file_content: bytes) -> str:
-    """Extract text from PDF file content"""
-    try:
-        pdf_file = io.BytesIO(file_content)
-        
-        #  PDF reader object
-        pdf_reader = PdfReader(pdf_file)
-        
-        # Extract text from all pages
-        text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text() + "\n"
-        
-        return text.strip()
-    except Exception as e:
-        raise ValueError(f"Error reading PDF: {str(e)}")
-
 def validate_pdf(file_content: bytes) -> bool:
-    """Validate if the file content is a valid PDF"""
+    """Validate PDF content"""
     try:
-        # PDF header
-        if not file_content.startswith(b'%PDF'):
+        # Basic PDF signature check
+        if len(file_content) < 4:
             return False
-        
-        # creates a PDF reader to validate structure
+            
+        # Check for %PDF header (case insensitive)
+        header = file_content[0:4].lower()
+        if not header.startswith(b'%pdf'):
+            return False
+            
+        # Attempt to parse with PdfReader
         pdf_file = io.BytesIO(file_content)
-        PdfReader(pdf_file)
-        return True
+        reader = PdfReader(pdf_file)
+        return len(reader.pages) > 0
     except:
         return False
+
+def extract_text_from_pdf(file_content: bytes) -> str:
+    """Extract text from PDF content"""
+    try:
+        pdf_file = io.BytesIO(file_content)
+        reader = PdfReader(pdf_file)
+        
+        text_parts = []
+        for page in reader.pages:
+            try:
+                page_text = page.extract_text() or ""
+                if page_text.strip():
+                    text_parts.append(page_text)
+            except:
+                continue
+                
+        return "\n".join(text_parts).strip()
+    except Exception as e:
+        raise ValueError(f"Failed to extract PDF text: {str(e)}")
